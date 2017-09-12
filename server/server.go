@@ -141,7 +141,7 @@ func accept_incomming_connections(pcc chan PlayerConnection, pn chan byte){
                 return
             }
 
-            if n!=len(message_start+connect_to_server_message) || string(buffer[:n])!=message_start+looking_for_server_message{
+            if n!=len(message_start+connect_to_server_message) || string(buffer[:n])!=message_start+connect_to_server_message{
                 log.Println("[accept_incomming_connections] Error: Incorrect connect message from:", connection.RemoteAddr())
                 return
             }
@@ -374,11 +374,17 @@ func run_game(player1_connection, player2_connection PlayerConnection) {
         n,err:=p1_gamestate_connection.Write(send_buffer[:])
         if err!=nil{
             log.Println("[run_game] Error (p1_gamestate_connection.Write):", n, err)
+            // if strings.Contains(err.Error(), "connection refused"){
+            //     return
+            // }
         }
         uint16_to_slice(player2.last_iteration, send_buffer[0:2])
         n,err=p2_gamestate_connection.Write(send_buffer[:])
         if err!=nil{
             log.Println("[run_game] Error (p2_gamestate_connection.Write):", n, err)
+            // if strings.Contains(err.Error(), "connection refused"){
+            //     return
+            // }
         }
 
         iteration_duration:=time.Since(now)

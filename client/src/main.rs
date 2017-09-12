@@ -14,8 +14,8 @@ use sdl2::pixels::Color;
 use sdl2::rect::Rect;
 
 // // THREAD IMPORTS
-// use std::thread;
-// use std::sync::{Arc, Mutex};
+use std::thread;
+use std::sync::{Arc, Mutex};
 // use std::sync::atomic::{AtomicBool, Ordering};
 
 // NETWORK CONSTANTS
@@ -163,9 +163,7 @@ fn main() {
     .or_else( |_| get_server_ip(FIND_SERVER_PROTOCOL_BROADCAST_ADDRESS))
     .expect("Could not find server's ip");
 
-    let (player_num, gamestate_receiver, eventstate_sender)=connect_to_server(server_ip).expect("Could not connect to server");
-
-    // let (mut stream, socket)=connect_to_server(server_ip).expect("Could not connect to server");
+    let (_, gamestate_receiver, mut eventstate_sender)=connect_to_server(server_ip).expect("Could not connect to server");
 
     let sdl_context = sdl2::init().unwrap();
     let video_subsystem = sdl_context.video().unwrap();
@@ -188,56 +186,51 @@ fn main() {
     let mut p2_rect=Rect::new((WINDOW_WIDTH-PLAYER_WIDTH) as i32 - PLAYER_PADDING,0,PLAYER_WIDTH,PLAYER_HEIGHT);
     let mut ball_rect=Rect::new((WINDOW_WIDTH/2-BALL_SIZE/2) as i32,(WINDOW_HEIGHT/2-BALL_SIZE/2) as i32,BALL_SIZE,BALL_SIZE);
 
-    // let game_state=Arc::new(Mutex::new(GameState(0,0,0,0)));
-    // let threads_gamestate=game_state.clone();
-    // thread::spawn(move ||{
-    //     loop{
-    //         match socket.get_game_state() {
-    //             Err(e) => println!("Error (socket.get_game_state): {}", e),
-    //             Ok(new_game_state) => {
-    //                 if let Ok(mut game_state) = threads_gamestate.lock(){
-    //                     *game_state=new_game_state;
-    //                 }
-    //             }
-    //         }
-    //     }
-    // });
+    let received_gamestate=Arc::new(Mutex::new((0,GameState(0,0,0,0))));
+    let received_gamestate_c=received_gamestate.clone();
+    thread::spawn(move ||{
+        loop{
+            match gamestate_receiver.get_game_state(){
+                Err(e) => println!("Error (gamestate_receiver.get_game_state): {}", e),
+                Ok(new_received_gamestate)=>{
+                    match received_gamestate_c.lock(){
+                        Err(e) => println!("Error (received_gamestate_c.lock): {}", e),
+                        Ok(mut received_gamestate) => *received_gamestate=new_received_gamestate,
+                    }
+                }
+            }
+        }
+    });
 
     'running: loop{
         for event in event_pump.poll_iter() {
             match event {
                 Event::Quit {..} | Event::KeyDown { keycode: Some(Keycode::Escape), .. } => {
-                    // stream.send_u16(1).map(|_| ()).unwrap_or_else(|e| println!("Error (stream.send_u16): {}", e));
+                    eventstate_sender.add_eventflag(1);
+                    // eventstate_sender.send_eventstate(0).map(|_| ()).unwrap_or_else(|e| println!("Error (eventstate_sender.send_eventstate): {}", e));
                     break 'running;
                 }
-                // Event::KeyDown { keycode: Some(Keycode::Up), .. } => stream.send_u16(2).map(|_| ()).unwrap_or_else(|e| println!("Error (stream.send_u16): {}", e)),
-                // Event::KeyUp { keycode: Some(Keycode::Up), .. } => stream.send_u16(3).map(|_| ()).unwrap_or_else(|e| println!("Error (stream.send_u16): {}", e)),
-                // Event::KeyDown { keycode: Some(Keycode::Down), .. } => stream.send_u16(4).map(|_| ()).unwrap_or_else(|e| println!("Error (stream.send_u16): {}", e)),
-                // Event::KeyUp { keycode: Some(Keycode::Down), .. } => stream.send_u16(5).map(|_| ()).unwrap_or_else(|e| println!("Error (stream.send_u16): {}", e)),
+                Event::KeyDown { keycode: Some(Keycode::Up), .. } => eventstate_sender.add_eventflag(2),
+                Event::KeyUp { keycode: Some(Keycode::Up), .. } => eventstate_sender.remove_eventflag(2),
+                Event::KeyDown { keycode: Some(Keycode::Down), .. } => eventstate_sender.add_eventflag(4),
+                Event::KeyUp { keycode: Some(Keycode::Down), .. } => eventstate_sender.remove_eventflag(4),
                 _ => (),
             }
         }
 
-        // if let Ok(game_state)=game_state.try_lock(){
-        //     p1_rect.set_y(game_state.0 as i32);
-        //     p2_rect.set_y(game_state.1 as i32);
-        //     ball_rect.set_x(game_state.2 as i32);
-        //     ball_rect.set_y(game_state.3 as i32);
-        // } else {
-        //     continue;
-        // }
+        eventstate_sender.send_eventstate(0).map(|_| ()).unwrap_or_else(|e| println!("Error (eventstate_sender.send_eventstate): {}", e));
 
-        // match socket.get_game_state() {
-        //     Err(e) => println!("Error (socket.get_game_state): {}", e),
-        //     Ok(game_state) => {
-        //         p1_rect.set_y(game_state.0 as i32);
-        //         p2_rect.set_y(game_state.1 as i32);
-        //         ball_rect.set_x(game_state.2 as i32);
-        //         ball_rect.set_y(game_state.3 as i32);
-        //     }
-        // }
+        if let Ok(received_gamestate)=received_gamestate.try_lock(){
+            p1_rect.set_y((received_gamestate.1).0 as i32);
+            p2_rect.set_y((received_gamestate.1).1 as i32);
+            ball_rect.set_x((received_gamestate.1).2 as i32);
+            ball_rect.set_y((received_gamestate.1).3 as i32);
+        } else {
+            //make it last a frame here
+            continue;
+        }
 
-
+        //make it last a frame here also
 
         canvas.set_draw_color(Color::RGB(0, 0, 0));
         canvas.clear();
