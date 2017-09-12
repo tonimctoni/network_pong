@@ -38,6 +38,18 @@ const WINDOW_HEIGHT: u32 = 600;
 const WINDOW_TITLE: &str = "Network Pong";
 
 
+fn uint16_from_slice(slice: &[u8]) -> u16{
+    ((slice[1] as u16)<<8) | ((slice[0] as u16)<<0)
+}
+
+fn int16_from_slice(slice: &[u8]) -> i16{
+    ((slice[1] as i16)<<8) | ((slice[0] as i16)<<0)
+}
+
+fn uint16_to_slice(n: u16, slice: &mut[u8]){
+    slice[0]=((n>>0)&0xFF) as u8;
+    slice[1]=((n>>8)&0xFF) as u8;
+}
 
 fn get_server_ip(sendto_address: &str) -> io::Result<IpAddr>{
     let local_addr={
@@ -67,15 +79,6 @@ fn get_server_ip(sendto_address: &str) -> io::Result<IpAddr>{
             Err(io::Error::new(io::ErrorKind::Other, "[get_server_ip] Wrong response size"))
         }
     }
-}
-
-fn uint16_from_slice(slice: &[u8]) -> u16{
-    return ((slice[1] as u16)<<8) | ((slice[0] as u16)<<0)
-}
-
-fn uint16_to_slice(n: u16, slice: &mut[u8]){
-    slice[0]=((n>>0)&0xFF) as u8;
-    slice[1]=((n>>8)&0xFF) as u8;
 }
 
 struct EventstateSender {
@@ -110,67 +113,47 @@ struct GameState(i16, i16, i16, i16);
 
 struct GamestateReceiver {
     socket: UdpSocket,
-    received_messages: Vec<(u16, GameState)>
 }
 
-fn get_server_ports(server_ip: IpAddr) -> io::Result<(u16, u16)>{
+impl GamestateReceiver {
+    fn new(ip: IpAddr, port: u16) -> io::Result<GamestateReceiver>{
+        Ok(GamestateReceiver{socket:UdpSocket::bind(SocketAddr::new(ip, port))?})
+    }
+
+    fn get_game_state(&self) -> io::Result<(u16, GameState)>{
+        let mut buffer=[0;100];
+        let (n,_)=self.socket.recv_from(&mut buffer)?;
+
+        if n!=10{
+            Err(io::Error::new(io::ErrorKind::Other, "[get_game_state] Wrong response size"))
+        } else {
+            Ok((uint16_from_slice(&buffer[0..2]),
+                GameState(int16_from_slice(&buffer[2..4]),
+                    int16_from_slice(&buffer[4..6]),
+                    int16_from_slice(&buffer[6..8]),
+                    int16_from_slice(&buffer[8..10])
+                    )))
+        }
+    }
+}
+
+fn connect_to_server(server_ip: IpAddr) -> io::Result<(u8, GamestateReceiver, EventstateSender)>{
     let mut stream = TcpStream::connect(SocketAddr::new(server_ip, CONNECT_PORT))?;
 
     stream.write(CONNECT_TO_SERVER_MESSAGE.as_bytes())?;
     let mut buffer=[0;100];
     let n=stream.read(&mut buffer)?;
 
-    if n!=4{
-        Err(io::Error::new(io::ErrorKind::Other, "[get_server_ports] Wrong response size"))
+    if n!=5{
+        Err(io::Error::new(io::ErrorKind::Other, "[connect_to_server] Wrong response size"))
     } else {
-        Ok((uint16_from_slice(&buffer[0..2]), uint16_from_slice(&buffer[2..4])))
+        // Ok((uint16_from_slice(&buffer[0..2]), uint16_from_slice(&buffer[2..4])))
+        Ok((buffer[0],
+            GamestateReceiver::new(server_ip, uint16_from_slice(&buffer[1..3]))?,
+            EventstateSender::new(server_ip, uint16_from_slice(&buffer[3..5]))?)
+        )
     }
 }
-
-// struct SendEventMessagesStream {
-//     stream: TcpStream
-// }
-
-// impl SendEventMessagesStream {
-//     fn send_u16(&mut self, keycode: u16) -> io::Result<usize> {
-//         let to_send=[((keycode>>0)&0xff) as u8, ((keycode>>8)&0xff) as u8];
-//         self.stream.write(&to_send)
-//     }
-// }
-
-// struct GetGameStateSocket {
-//     socket: UdpSocket
-// }
-
-// // player1_pos, player2_pos, ball_pos_x, ball_pos_y
-// #[derive(Copy, Clone)]
-// struct GameState(i16, i16, i16, i16);
-// impl GetGameStateSocket {
-//     fn get_game_state(&self) -> io::Result<GameState>{
-//         let mut buffer=[0;100];
-//         let (n,_)=self.socket.recv_from(&mut buffer)?;
-
-//         if n!=8{
-//             Err(io::Error::new(io::ErrorKind::Other, "[get_game_state] Wrong response size"))
-//         } else {
-//             Ok(GameState(
-//                 ((buffer[1] as i16)<<8) | ((buffer[0] as i16)<<0), 
-//                 ((buffer[3] as i16)<<8) | ((buffer[2] as i16)<<0), 
-//                 ((buffer[5] as i16)<<8) | ((buffer[4] as i16)<<0), 
-//                 ((buffer[7] as i16)<<8) | ((buffer[6] as i16)<<0)
-//                 ))
-//         }
-//     }
-// }
-
-// fn connect_to_server(server_ip: IpAddr) -> io::Result<(SendEventMessagesStream, GetGameStateSocket)>{
-//     let stream = TcpStream::connect(SocketAddr::new(server_ip, CONNECT_PORT))?;
-//     let socket = UdpSocket::bind(SocketAddr::new(server_ip, stream.local_addr()?.port()))?;
-//     println!("[connect_to_server] Connection established: TCP({}->{}), UDP({}<-{})", stream.local_addr()?, stream.peer_addr()?, socket.local_addr()?, SocketAddr::new(server_ip, 0));
-
-//     return Ok((SendEventMessagesStream{stream:stream}, GetGameStateSocket{socket:socket}));
-// }
-
 
 // TODO: REMOVE MAGIC NUMBERS
 // TODO: Will probably need a queue for incomming messages like on the server
@@ -179,6 +162,8 @@ fn main() {
     let server_ip=get_server_ip(FIND_SERVER_PROTOCOL_LOCAL_ADDRESS)
     .or_else( |_| get_server_ip(FIND_SERVER_PROTOCOL_BROADCAST_ADDRESS))
     .expect("Could not find server's ip");
+
+    let (player_num, gamestate_receiver, eventstate_sender)=connect_to_server(server_ip).expect("Could not connect to server");
 
     // let (mut stream, socket)=connect_to_server(server_ip).expect("Could not connect to server");
 

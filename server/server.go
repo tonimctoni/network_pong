@@ -18,7 +18,7 @@ const(
     connect_address = ":1235"
     message_buffer_size = 1000
     port_counter_start = 10002
-    max_event_messages_to_process = 2
+    // max_event_messages_to_process = 2
 
     PLAYER_WIDTH = 15
     PLAYER_HEIGHT = 80
@@ -44,6 +44,11 @@ func uint16_from_slice(slice []byte) uint16{
 }
 
 func uint16_to_slice(n uint16, slice []byte){
+    slice[0]=byte((n>>0)&0xFF)
+    slice[1]=byte((n>>8)&0xFF)
+}
+
+func int16_to_slice(n int16, slice []byte){
     slice[0]=byte((n>>0)&0xFF)
     slice[1]=byte((n>>8)&0xFF)
 }
@@ -102,7 +107,12 @@ type PlayerConnection struct{
     ip_address string
 }
 
-func accept_incomming_connections(pcc chan PlayerConnection){
+// type TowPlayerConnections{
+//     p1 PlayerConnection
+//     p2 PlayerConnection
+// }
+
+func accept_incomming_connections(pcc chan PlayerConnection, pn chan byte){
     listener,err:=net.Listen("tcp4", connect_address)
     if err!=nil{
         log.Fatalln("[accept_incomming_connections] Error (net.Listen):", err)
@@ -136,20 +146,22 @@ func accept_incomming_connections(pcc chan PlayerConnection){
                 return
             }
 
-            uint16_to_slice(gamestate_port, buffer[0:2])
-            uint16_to_slice(eventstate_port, buffer[2:4])
-            _,err=connection.Write(buffer[:4])
-            if err!=nil{
-                log.Println("[accept_incomming_connections] Error (connection.Write):", err)
-                return
-            }
-            log.Println("[accept_incomming_connections] Connection established for:", connection.RemoteAddr())
-
             ip_address,_,err:=get_ip_and_port_from_address(connection.RemoteAddr().String())
             if err!=nil{
                 log.Println("[accept_incomming_connections] Error (get_ip_and_port_from_address):", err)
                 return
             }
+
+            buffer[0]=<-pn
+            uint16_to_slice(gamestate_port, buffer[1:3])
+            uint16_to_slice(eventstate_port, buffer[3:5])
+            _,err=connection.Write(buffer[:5])
+            if err!=nil{
+                log.Println("[accept_incomming_connections] Error (connection.Write):", err)
+                pn<-buffer[0]
+                return
+            }
+            log.Println("[accept_incomming_connections] Connection established for:", connection.RemoteAddr())
 
             pcc<-PlayerConnection{gamestate_port, eventstate_port, ip_address}
         }(connection, port_counter, port_counter+1)
@@ -320,33 +332,43 @@ func run_game(player1_connection, player2_connection PlayerConnection) {
     now:=time.Now()
     for atomic.LoadInt64(finished)==0{
         p1_messages:=p1_message_receiver.receive()
+        if len(p1_messages)!=0{
+            player1.update_keystate(p1_messages[len(p1_messages)-1][1], p1_messages[len(p1_messages)-1][0])
+        }
+
         p2_messages:=p2_message_receiver.receive()
-
-        if len(p1_messages)>max_event_messages_to_process{
-            p1_messages=p1_messages[len(p1_messages)-max_event_messages_to_process:]
-        }
-        for _,message:=range p1_messages{
-            if message[1]&1!=0{
-                return
-            }
-            player1.update_keystate(message[1], message[0])
-            player1.move()
+        if len(p2_messages)!=0{
+            player2.update_keystate(p2_messages[len(p2_messages)-1][1], p2_messages[len(p2_messages)-1][0])
         }
 
-        if len(p2_messages)>max_event_messages_to_process{
-            p2_messages=p2_messages[len(p2_messages)-max_event_messages_to_process:]
-        }
-        for _,message:=range p2_messages{
-            if message[1]&1!=0{
-                return
-            }
-            player2.update_keystate(message[1], message[0])
-            player2.move()
-        }
+        player1.move()
+        player2.move()
+
+        // if len(p1_messages)>max_event_messages_to_process{
+        //     p1_messages=p1_messages[len(p1_messages)-max_event_messages_to_process:]
+        // }
+        // for _,message:=range p1_messages{
+        //     if message[1]&1!=0{
+        //         return
+        //     }
+        //     player1.update_keystate(message[1], message[0])
+        //     player1.move()
+        // }
+
+        // if len(p2_messages)>max_event_messages_to_process{
+        //     p2_messages=p2_messages[len(p2_messages)-max_event_messages_to_process:]
+        // }
+        // for _,message:=range p2_messages{
+        //     if message[1]&1!=0{
+        //         return
+        //     }
+        //     player2.update_keystate(message[1], message[0])
+        //     player2.move()
+        // }
 
         send_buffer:=[10]byte{}
-        uint16_to_slice(uint16(player1.pos), send_buffer[2:4])
-        uint16_to_slice(uint16(player2.pos), send_buffer[4:6])
+        int16_to_slice(player1.pos, send_buffer[2:4])
+        int16_to_slice(player2.pos, send_buffer[4:6])
 
         uint16_to_slice(player1.last_iteration, send_buffer[0:2])
         n,err:=p1_gamestate_connection.Write(send_buffer[:])
@@ -370,20 +392,22 @@ func run_game(player1_connection, player2_connection PlayerConnection) {
 
 }
 
-// }
-
 // TODO: experiment with lower buffer sizes to find errors/performance costs
 // TODO: send gamestate in each loop, even if no changes where made
 // TODO: analyze "framerate" (need optimizing?)
 // TODO: REMOVE MAGIC NUMBERS
 // TODO: Add timeout to connections
 func main() {
-    c:=make(chan PlayerConnection, 5)
+    // Buffer size needs to be one for synchronization
+    c:=make(chan PlayerConnection)
+    cn:=make(chan byte)
     go find_server_protocol_server()
-    go accept_incomming_connections(c)
+    go accept_incomming_connections(c, cn)
 
     for{
+        cn<-1
         player1_connection:=<-c
+        cn<-2
         player2_connection:=<-c
         go run_game(player1_connection, player2_connection)
     }
