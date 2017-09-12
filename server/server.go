@@ -6,15 +6,19 @@ import "strings"
 import "errors"
 import "sync/atomic"
 import "time"
+import "fmt"
 
 const(
     find_server_protocol_listen_address = ":1234"
     message_start = "cB9"
     looking_for_server_message = "LFS"
     looking_for_server_response = "IAS"
+    connect_to_server_message = "CTS"
     // character_whitelist = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
     connect_address = ":1235"
     message_buffer_size = 1000
+    port_counter_start = 10002
+    max_event_messages_to_process = 2
 
     PLAYER_WIDTH = 15
     PLAYER_HEIGHT = 80
@@ -34,6 +38,15 @@ const(
 //     }
 //     return true
 // }
+
+func uint16_from_slice(slice []byte) uint16{
+    return (uint16(slice[1])<<8) | (uint16(slice[0])<<0)
+}
+
+func uint16_to_slice(n uint16, slice []byte){
+    slice[0]=byte((n>>0)&0xFF)
+    slice[1]=byte((n>>8)&0xFF)
+}
 
 func get_ip_and_port_from_address(address string) (string, string, error) {
     i:=strings.LastIndex(address, ":")
@@ -83,12 +96,13 @@ func find_server_protocol_server() {
     }
 }
 
-type PlayersConnections struct{
-    incomming_events net.Conn
-    outgoing_gamestate net.Conn
+type PlayerConnection struct{
+    gamestate_port uint16
+    eventstate_port uint16
+    ip_address string
 }
 
-func accept_incomming_connections(c chan PlayersConnections) {
+func accept_incomming_connections(pcc chan PlayerConnection){
     listener,err:=net.Listen("tcp4", connect_address)
     if err!=nil{
         log.Fatalln("[accept_incomming_connections] Error (net.Listen):", err)
@@ -96,28 +110,55 @@ func accept_incomming_connections(c chan PlayersConnections) {
     defer listener.Close()
     log.Println("[accept_incomming_connections] Listening on:", listener.Addr())
 
+    port_counter:=uint16(port_counter_start)
     for{
         connection, err:=listener.Accept()
         if err != nil {
-            log.Println("Error (listener.Accept):", err)
+            log.Println("[accept_incomming_connections] Error (listener.Accept):", err)
             continue
         }
 
-        go func(event_connection net.Conn){
-            gamestate_connection,err:=net.Dial("udp4", connection.RemoteAddr().String())
+        port_counter+=2
+        if port_counter<10{
+            port_counter=port_counter_start
+        }
+        go func(connection net.Conn, gamestate_port, eventstate_port uint16){
+            defer connection.Close()
+            buffer:=make([]byte, 100)
+            n,err:=connection.Read(buffer)
             if err!=nil{
-                log.Println("[accept_incomming_connections] Error (net.Dial):", err)
+                log.Println("[accept_incomming_connections] Error (connection.Read):", err)
                 return
             }
 
-            c<-PlayersConnections{event_connection, gamestate_connection}
-        }(connection)
+            if n!=len(message_start+connect_to_server_message) || string(buffer[:n])!=message_start+looking_for_server_message{
+                log.Println("[accept_incomming_connections] Error: Incorrect connect message from:", connection.RemoteAddr())
+                return
+            }
+
+            uint16_to_slice(gamestate_port, buffer[0:2])
+            uint16_to_slice(eventstate_port, buffer[2:4])
+            _,err=connection.Write(buffer[:4])
+            if err!=nil{
+                log.Println("[accept_incomming_connections] Error (connection.Write):", err)
+                return
+            }
+            log.Println("[accept_incomming_connections] Connection established for:", connection.RemoteAddr())
+
+            ip_address,_,err:=get_ip_and_port_from_address(connection.RemoteAddr().String())
+            if err!=nil{
+                log.Println("[accept_incomming_connections] Error (get_ip_and_port_from_address):", err)
+                return
+            }
+
+            pcc<-PlayerConnection{gamestate_port, eventstate_port, ip_address}
+        }(connection, port_counter, port_counter+1)
     }
 }
 
 type MessageBuffer struct{
     pos int64
-    buffer [message_buffer_size]uint16
+    buffer [message_buffer_size][2]uint16
 }
 
 type MessageSender struct{
@@ -138,7 +179,7 @@ func create_message_transmission_pair() (MessageSender, MessageReceiver){
     return MessageSender{message_buffer_ptr, mbc}, MessageReceiver{message_buffer_ptr, mbc, 0}
 }
 
-func (m *MessageSender) send(message uint16){
+func (m *MessageSender) send(message [2]uint16){
     pos:=atomic.LoadInt64(&m.message_buffer.pos)
 
     m.message_buffer.buffer[pos]=message
@@ -156,7 +197,7 @@ func (m *MessageSender) send(message uint16){
     }
 }
 
-func (m *MessageReceiver) receive() []uint16{
+func (m *MessageReceiver) receive() [][2]uint16{
     if m.pos>message_buffer_size{
         panic("m.pos>message_buffer_size")
     }
@@ -172,28 +213,36 @@ func (m *MessageReceiver) receive() []uint16{
     return to_return
 }
 
-func forward_event_messages(message_sender MessageSender, incomming_events net.Conn, finished *int64){
-    defer incomming_events.Close()
+func forward_eventstate_messages(message_sender MessageSender, player_connection PlayerConnection, finished *int64){
+    defer atomic.StoreInt64(finished, 1)
+
+    eventstate_connection, err:=net.ListenPacket("udp4", fmt.Sprintf("%s:%d", player_connection.ip_address, player_connection.eventstate_port))
+    if err!=nil{
+        log.Println("[forward_eventstate_messages] Error (net.ListenPacket):", err)
+        return
+    }
+    // log.Println("[forward_eventstate_messages] Listening to events from:", player_connection.ip_address)
+    // defer log.Println("[forward_eventstate_messages] Connection closed for:", player_connection.ip_address)
+    defer eventstate_connection.Close()
+
+
     buffer:=make([]byte, 100)
     for atomic.LoadInt64(finished)==0{
-        n,err:=incomming_events.Read(buffer)
+        n,addr,err:=eventstate_connection.ReadFrom(buffer)
         if err!=nil{
-            log.Println("[forward_event_messages] Error (connection.Read):",  incomming_events.RemoteAddr(), err)
+            log.Println("[forward_eventstate_messages] Error (eventstate_connection.Read):", addr, err)
             if err.Error()=="EOF"{
-                atomic.StoreInt64(finished, 1)
+                return
             }
+        }
+
+        if n!=4{
+            log.Println("[forward_eventstate_messages] n!=4", buffer)
             continue
         }
 
-        if n!=2{
-            log.Println("[forward_event_messages] n!=2", buffer)
-            continue
-        }
-
-        message_sender.send((uint16(buffer[1])<<8) | (uint16(buffer[0])<<0))
+        message_sender.send([2]uint16{uint16_from_slice(buffer[0:2]), uint16_from_slice(buffer[2:4])})
     }
-
-    log.Println("[forward_event_messages] Connection closed")
 }
 
 type Keystate struct{
@@ -203,19 +252,24 @@ type Keystate struct{
 
 type Player struct{
     keystate Keystate
+    last_iteration uint16
     pos int16
 }
 
-func (p *Player) update_keystate(message uint16){
-    if message==2{
+func (p *Player) update_keystate(eventstate uint16, iteration uint16){
+    if eventstate&2!=0{
         p.keystate.up=true
-    } else if message==3{
+    } else {
         p.keystate.up=false
-    } else if message==4{
+    }
+
+    if eventstate&4!=0{
         p.keystate.down=true
-    } else if message==5{
+    } else {
         p.keystate.down=false
     }
+
+    p.last_iteration=iteration
 }
 
 func (p *Player) move(){
@@ -238,84 +292,99 @@ func (p *Player) move(){
     }
 }
 
-func fill_send_buffer(buffer []byte, p1pos, p2pos int16){
-    buffer[0]=byte((p1pos>>0)&0xFF)
-    buffer[1]=byte((p1pos>>8)&0xFF)
-    buffer[2]=byte((p2pos>>0)&0xFF)
-    buffer[3]=byte((p2pos>>8)&0xFF)
-}
-
-func run_game(player1s_connections, player2s_connections PlayersConnections){
-    player1s_outgoing_gamestate:=player1s_connections.outgoing_gamestate
-    player2s_outgoing_gamestate:=player2s_connections.outgoing_gamestate
-    defer player1s_outgoing_gamestate.Close()
-    defer player2s_outgoing_gamestate.Close()
-
+func run_game(player1_connection, player2_connection PlayerConnection) {
+    finished:=new(int64)
+    defer atomic.StoreInt64(finished, 1)
     p1_message_sender, p1_message_receiver:=create_message_transmission_pair()
     p2_message_sender, p2_message_receiver:=create_message_transmission_pair()
-    finished:=new(int64)
-    go forward_event_messages(p1_message_sender, player1s_connections.incomming_events, finished)
-    go forward_event_messages(p2_message_sender, player2s_connections.incomming_events, finished)
+    go forward_eventstate_messages(p1_message_sender, player1_connection, finished)
+    go forward_eventstate_messages(p2_message_sender, player2_connection, finished)
+
+    p1_gamestate_connection,err:=net.Dial("udp4", fmt.Sprintf("%s:%d", player1_connection.ip_address, player1_connection.gamestate_port))
+    if err!=nil{
+        log.Println("[run_game] Error (net.Dial):", err)
+        return
+    }
+    defer p1_gamestate_connection.Close()
+
+    p2_gamestate_connection,err:=net.Dial("udp4", fmt.Sprintf("%s:%d", player2_connection.ip_address, player2_connection.gamestate_port))
+    if err!=nil{
+        log.Println("[run_game] Error (net.Dial):", err)
+        return
+    }
+    defer p2_gamestate_connection.Close()
 
     player1:=Player{}
     player2:=Player{}
 
-    send_buffer:=[8]byte{}
     now:=time.Now()
-    outer_loop: for atomic.LoadInt64(finished)==0{
-        for _,message:=range p1_message_receiver.receive(){
-            if message==1{
-                atomic.StoreInt64(finished, 1)
-                break outer_loop
-            } else {
-                player1.update_keystate(message)
+    for atomic.LoadInt64(finished)==0{
+        p1_messages:=p1_message_receiver.receive()
+        p2_messages:=p2_message_receiver.receive()
+
+        if len(p1_messages)>max_event_messages_to_process{
+            p1_messages=p1_messages[len(p1_messages)-max_event_messages_to_process:]
+        }
+        for _,message:=range p1_messages{
+            if message[1]&1!=0{
+                return
             }
+            player1.update_keystate(message[1], message[0])
+            player1.move()
         }
 
-        for _,message:=range p2_message_receiver.receive(){
-            if message==1{
-                atomic.StoreInt64(finished, 1)
-                break outer_loop
-            } else {
-                player2.update_keystate(message)
+        if len(p2_messages)>max_event_messages_to_process{
+            p2_messages=p2_messages[len(p2_messages)-max_event_messages_to_process:]
+        }
+        for _,message:=range p2_messages{
+            if message[1]&1!=0{
+                return
             }
+            player2.update_keystate(message[1], message[0])
+            player2.move()
         }
 
-        player1.move()
-        player2.move()
-        fill_send_buffer(send_buffer[:], player1.pos, player2.pos)
+        send_buffer:=[10]byte{}
+        uint16_to_slice(uint16(player1.pos), send_buffer[2:4])
+        uint16_to_slice(uint16(player2.pos), send_buffer[4:6])
 
-        iterations_duration:=time.Since(now)
-        // log.Println(iterations_duration)
-        if iterations_duration<MIN_UPDATE_PERIOD{
-            time.Sleep(MIN_UPDATE_PERIOD-iterations_duration)
-        }
-
-        n,err:=player1s_outgoing_gamestate.Write(send_buffer[:])
+        uint16_to_slice(player1.last_iteration, send_buffer[0:2])
+        n,err:=p1_gamestate_connection.Write(send_buffer[:])
         if err!=nil{
-            log.Println("[run_game] Error (player1s_outgoing_gamestate.Write):", n, err)
+            log.Println("[run_game] Error (p1_gamestate_connection.Write):", n, err)
         }
-        n,err=player2s_outgoing_gamestate.Write(send_buffer[:])
+        uint16_to_slice(player2.last_iteration, send_buffer[0:2])
+        n,err=p2_gamestate_connection.Write(send_buffer[:])
         if err!=nil{
-            log.Println("[run_game] Error (player2s_outgoing_gamestate.Write):", n, err)
+            log.Println("[run_game] Error (p2_gamestate_connection.Write):", n, err)
+        }
+
+        iteration_duration:=time.Since(now)
+        // log.Println(iteration_duration)
+        if iteration_duration<MIN_UPDATE_PERIOD{
+            time.Sleep(MIN_UPDATE_PERIOD-iteration_duration)
         }
 
         now=time.Now()
     }
+
 }
+
+// }
 
 // TODO: experiment with lower buffer sizes to find errors/performance costs
 // TODO: send gamestate in each loop, even if no changes where made
 // TODO: analyze "framerate" (need optimizing?)
 // TODO: REMOVE MAGIC NUMBERS
+// TODO: Add timeout to connections
 func main() {
-    c:=make(chan PlayersConnections, 5)
+    c:=make(chan PlayerConnection, 5)
     go find_server_protocol_server()
     go accept_incomming_connections(c)
 
     for{
-        player1s_connections:=<-c
-        player2s_connections:=<-c
-        go run_game(player1s_connections, player2s_connections)
+        player1_connection:=<-c
+        player2_connection:=<-c
+        go run_game(player1_connection, player2_connection)
     }
 }

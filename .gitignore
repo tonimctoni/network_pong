@@ -3,3 +3,4 @@ server/server
 client/target
 client/Cargo.lock
 client_backup
+notes.txt
