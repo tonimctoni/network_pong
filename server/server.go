@@ -25,6 +25,7 @@ const(
     PLAYER_PADDING = 15
     PLAYER_SPEED = 6
     BALL_SIZE = 15
+    BALL_SPEED = 6
     WINDOW_WIDTH = 800
     WINDOW_HEIGHT = 600
     MIN_UPDATE_PERIOD = 16*time.Millisecond
@@ -304,6 +305,56 @@ func (p *Player) move(){
     }
 }
 
+type Ball struct{
+    pos_x int16
+    pos_y int16
+    speed_x int16
+    speed_y int16
+}
+
+func (b *Ball) move_y(){
+    b.pos_y+=b.speed_y
+    if b.pos_y<0{
+        b.pos_y=-b.pos_y
+        b.speed_y=-b.speed_y
+    }
+    if b.pos_y+BALL_SIZE>=WINDOW_HEIGHT{
+        b.pos_y=(WINDOW_HEIGHT-BALL_SIZE-1)-(b.pos_y+BALL_SIZE-WINDOW_HEIGHT)
+        b.speed_y=-b.speed_y
+    }
+}
+
+func (b *Ball) move(p1pos, p2pos int16) int{
+    if b.pos_x+b.speed_x<PLAYER_PADDING+PLAYER_WIDTH && b.pos_x>PLAYER_PADDING+PLAYER_WIDTH{
+        portion_moved:=float64(PLAYER_PADDING+PLAYER_WIDTH-b.pos_x)/float64(b.speed_x)
+        this_speed_x:=int16(portion_moved*float64(b.speed_x))
+        this_speed_y:=int16(portion_moved*float64(b.speed_y))
+
+        moved_portion_y:=b.pos_y+this_speed_y
+        if p1pos<=moved_portion_y+BALL_SIZE && p1pos+PLAYER_HEIGHT>=moved_portion_y{
+            b.pos_x+=this_speed_x-(b.speed_x-this_speed_x)
+            b.speed_x=-b.speed_x
+            b.move_y()
+            return 0
+        } else {
+            b.pos_x=WINDOW_WIDTH/2-BALL_SIZE/2
+            b.pos_y=WINDOW_HEIGHT/2-BALL_SIZE/2
+            b.speed_x=BALL_SPEED
+            b.speed_y=-BALL_SPEED
+            return 2
+        }
+    } else if b.pos_x+b.speed_x>WINDOW_WIDTH-(PLAYER_PADDING+PLAYER_WIDTH) && b.pos_x<WINDOW_WIDTH-(PLAYER_PADDING+PLAYER_WIDTH){
+        b.pos_x-=b.speed_x
+        b.speed_x=-b.speed_x
+        b.move_y()
+        return 0
+    } else {
+        b.pos_x+=b.speed_x
+        b.move_y()
+        return 0
+    }
+}
+
 func run_game(player1_connection, player2_connection PlayerConnection) {
     finished:=new(int64)
     defer atomic.StoreInt64(finished, 1)
@@ -328,6 +379,7 @@ func run_game(player1_connection, player2_connection PlayerConnection) {
 
     player1:=Player{}
     player2:=Player{}
+    ball:=Ball{WINDOW_WIDTH/2-BALL_SIZE/2, WINDOW_HEIGHT/2-BALL_SIZE/2, BALL_SPEED, -BALL_SPEED}
 
     now:=time.Now()
     for atomic.LoadInt64(finished)==0{
@@ -343,6 +395,7 @@ func run_game(player1_connection, player2_connection PlayerConnection) {
 
         player1.move()
         player2.move()
+        ball.move(player1.pos, player2.pos)
 
         // if len(p1_messages)>max_event_messages_to_process{
         //     p1_messages=p1_messages[len(p1_messages)-max_event_messages_to_process:]
@@ -369,6 +422,8 @@ func run_game(player1_connection, player2_connection PlayerConnection) {
         send_buffer:=[10]byte{}
         int16_to_slice(player1.pos, send_buffer[2:4])
         int16_to_slice(player2.pos, send_buffer[4:6])
+        int16_to_slice(ball.pos_x, send_buffer[6:8])
+        int16_to_slice(ball.pos_y, send_buffer[8:10])
 
         uint16_to_slice(player1.last_iteration, send_buffer[0:2])
         n,err:=p1_gamestate_connection.Write(send_buffer[:])

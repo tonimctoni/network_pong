@@ -226,7 +226,7 @@ fn main() {
             ball_rect.set_x((received_gamestate.1).2 as i32);
             ball_rect.set_y((received_gamestate.1).3 as i32);
         } else {
-            //make it last a frame here
+            //make it last a frame here (or not, measure)
             continue;
         }
 
