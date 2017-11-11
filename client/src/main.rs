@@ -37,6 +37,8 @@ const WINDOW_WIDTH: u32 = 800;
 const WINDOW_HEIGHT: u32 = 600;
 const WINDOW_TITLE: &str = "Network Pong";
 
+// MAGIC_NUMBER_REMOVAL
+const GAMESTATE_MESSAGE_SIZE: usize = 16;
 
 fn uint16_from_slice(slice: &[u8]) -> u16{
     ((slice[1] as u16)<<8) | ((slice[0] as u16)<<0)
@@ -46,9 +48,16 @@ fn int16_from_slice(slice: &[u8]) -> i16{
     ((slice[1] as i16)<<8) | ((slice[0] as i16)<<0)
 }
 
-fn uint16_to_slice(n: u16, slice: &mut[u8]){
-    slice[0]=((n>>0)&0xFF) as u8;
-    slice[1]=((n>>8)&0xFF) as u8;
+// fn uint16_to_slice(n: u16, slice: &mut[u8]){
+//     slice[0]=((n>>0)&0xFF) as u8;
+//     slice[1]=((n>>8)&0xFF) as u8;
+// }
+
+fn uint32_to_slice(n: u32, slice: &mut[u8]){
+    slice[0]=((n>> 0)&0xFF) as u8;
+    slice[1]=((n>> 8)&0xFF) as u8;
+    slice[2]=((n>>16)&0xFF) as u8;
+    slice[3]=((n>>24)&0xFF) as u8;
 }
 
 fn get_server_ip(sendto_address: &str) -> io::Result<IpAddr>{
@@ -85,7 +94,7 @@ struct EventstateSender {
     ip: IpAddr,
     port: u16,
     socket: UdpSocket,
-    eventstate: u16
+    eventstate: u32
 }
 
 impl EventstateSender{
@@ -93,23 +102,48 @@ impl EventstateSender{
         Ok(EventstateSender{ip:ip, port:port, socket:UdpSocket::bind(DEFAULT_ADDRESS)?, eventstate:0})
     }
 
-    fn send_eventstate(&self, iteration: u16) -> io::Result<()>{
+    fn send_eventstate(&self) -> io::Result<()>{
         let mut buffer=[0;4];
-        uint16_to_slice(iteration, &mut buffer[0..2]);
-        uint16_to_slice(self.eventstate, &mut buffer[2..4]);
+        uint32_to_slice(self.eventstate, &mut buffer[0..4]);
         self.socket.send_to(&buffer, SocketAddr::new(self.ip, self.port)).map(|_| ())
     }
 
-    fn add_eventflag(&mut self, flag: u16){
+    fn add_eventflag(&mut self, flag: u32){
         self.eventstate|=flag;
     }
 
-    fn remove_eventflag(&mut self, flag: u16){
+    fn remove_eventflag(&mut self, flag: u32){
         self.eventstate&=0xFFFF^flag;
     }
 }
 
-struct GameState(i16, i16, i16, i16);
+// struct GameState(i16, i16, i16, i16);
+struct GameState {
+    p1_y: i16,
+    p2_y: i16,
+    ball_x: i16,
+    ball_y: i16,
+    ball_speed_x: i16,
+    ball_speed_y: i16,
+    score_p1: i16,
+    score_p2: i16,
+
+}
+
+impl Default for GameState {
+    fn default() -> Self{
+        GameState{
+            p1_y: 0,
+            p2_y: 0,
+            ball_x: (WINDOW_WIDTH/2-BALL_SIZE/2) as i16,
+            ball_y: (WINDOW_HEIGHT/2-BALL_SIZE/2) as i16,
+            ball_speed_x: 0,
+            ball_speed_y: 0,
+            score_p1: 0,
+            score_p2: 0,
+        }
+    }
+}
 
 struct GamestateReceiver {
     socket: UdpSocket,
@@ -120,19 +154,24 @@ impl GamestateReceiver {
         Ok(GamestateReceiver{socket:UdpSocket::bind(SocketAddr::new(ip, port))?})
     }
 
-    fn get_game_state(&self) -> io::Result<(u16, GameState)>{
+    fn get_game_state(&self) -> io::Result<GameState>{
         let mut buffer=[0;100];
         let (n,_)=self.socket.recv_from(&mut buffer)?;
 
-        if n!=10{
+        if n!=GAMESTATE_MESSAGE_SIZE{
             Err(io::Error::new(io::ErrorKind::Other, "[get_game_state] Wrong response size"))
         } else {
-            Ok((uint16_from_slice(&buffer[0..2]),
-                GameState(int16_from_slice(&buffer[2..4]),
-                    int16_from_slice(&buffer[4..6]),
-                    int16_from_slice(&buffer[6..8]),
-                    int16_from_slice(&buffer[8..10])
-                    )))
+            Ok(
+                GameState{
+                    p1_y: int16_from_slice(&buffer[0..2]),
+                    p2_y: int16_from_slice(&buffer[2..4]),
+                    ball_x: int16_from_slice(&buffer[4..6]),
+                    ball_y: int16_from_slice(&buffer[6..8]),
+                    ball_speed_x: int16_from_slice(&buffer[8..10]),
+                    ball_speed_y: int16_from_slice(&buffer[10..12]),
+                    score_p1: int16_from_slice(&buffer[12..14]),
+                    score_p2: int16_from_slice(&buffer[14..16]),
+                    })
         }
     }
 }
@@ -158,6 +197,9 @@ fn connect_to_server(server_ip: IpAddr) -> io::Result<(u8, GamestateReceiver, Ev
 // TODO: REMOVE MAGIC NUMBERS
 // TODO: Will probably need a queue for incomming messages like on the server
 // TODO: Set timeout for get_game_state and atomic *finish* flag
+// TODO: Use atomic flag to se whether gamestate changed (no need to lock gamestate if not)
+// TODO: If no gamestate messages come for some time, calculate ball and player changes (use mentioned flag to check if something arrived)
+// TODO: Dont redraw frame if there is nothing new to be drawn
 fn main() {
     let server_ip=get_server_ip(FIND_SERVER_PROTOCOL_LOCAL_ADDRESS)
     .or_else( |_| get_server_ip(FIND_SERVER_PROTOCOL_BROADCAST_ADDRESS))
@@ -185,8 +227,9 @@ fn main() {
     let mut p1_rect=Rect::new(PLAYER_PADDING,0,PLAYER_WIDTH,PLAYER_HEIGHT);
     let mut p2_rect=Rect::new((WINDOW_WIDTH-PLAYER_WIDTH) as i32 - PLAYER_PADDING,0,PLAYER_WIDTH,PLAYER_HEIGHT);
     let mut ball_rect=Rect::new((WINDOW_WIDTH/2-BALL_SIZE/2) as i32,(WINDOW_HEIGHT/2-BALL_SIZE/2) as i32,BALL_SIZE,BALL_SIZE);
+    let mut ball_speed=(0i16,0i16);
 
-    let received_gamestate=Arc::new(Mutex::new((0,GameState(0,0,0,0))));
+    let received_gamestate=Arc::new(Mutex::new(GameState::default()));
     let received_gamestate_c=received_gamestate.clone();
     thread::spawn(move ||{
         loop{
@@ -218,13 +261,18 @@ fn main() {
             }
         }
 
-        eventstate_sender.send_eventstate(0).map(|_| ()).unwrap_or_else(|e| println!("Error (eventstate_sender.send_eventstate): {}", e));
+        // eventstate_sender.send_eventstate().map(|_| ()).unwrap_or_else(|e| println!("Error (eventstate_sender.send_eventstate): {}", e));
+        if let Err(e) = eventstate_sender.send_eventstate() {
+            println!("Error (eventstate_sender.send_eventstate): {}", e);
+        }
 
         if let Ok(received_gamestate)=received_gamestate.try_lock(){
-            p1_rect.set_y((received_gamestate.1).0 as i32);
-            p2_rect.set_y((received_gamestate.1).1 as i32);
-            ball_rect.set_x((received_gamestate.1).2 as i32);
-            ball_rect.set_y((received_gamestate.1).3 as i32);
+            p1_rect.set_y(received_gamestate.p1_y as i32);
+            p2_rect.set_y(received_gamestate.p2_y as i32);
+            ball_rect.set_x(received_gamestate.ball_x as i32);
+            ball_rect.set_y(received_gamestate.ball_y as i32);
+            ball_speed.0=received_gamestate.ball_speed_x;
+            ball_speed.1=received_gamestate.ball_speed_y;
         } else {
             //make it last a frame here (or not, measure)
             continue;
