@@ -10,6 +10,7 @@ type Keystate struct{
 type Player struct{
     keystate Keystate
     pos int16
+    score int16
 }
 
 func (p *Player) update_keystate(eventstate uint32){
@@ -28,17 +29,13 @@ func (p *Player) update_keystate(eventstate uint32){
 
 func (p *Player) move(){
     if (p.keystate.up && p.keystate.down) {
-        return
-    }
-
-    if p.keystate.up{
+        //nothing
+    } else if p.keystate.up{
         p.pos-=PLAYER_SPEED
         if p.pos<0{
             p.pos=0
         }
-    }
-
-    if p.keystate.down{
+    } else if p.keystate.down{
         p.pos+=PLAYER_SPEED
         if p.pos+PLAYER_HEIGHT>=WINDOW_HEIGHT{
             p.pos=WINDOW_HEIGHT-PLAYER_HEIGHT-1

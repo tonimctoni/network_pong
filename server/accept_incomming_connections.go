@@ -3,6 +3,7 @@ import "net"
 import "log"
 import "strings"
 import "errors"
+import "sync"
 
 
 
@@ -20,7 +21,7 @@ type PlayerConnection struct{
     ip_address string
 }
 
-func accept_incomming_connections(pcc chan PlayerConnection, pn chan byte){
+func accept_incomming_connections(pcc chan PlayerConnection){
     listener,err:=net.Listen("tcp4", connect_address)
     if err!=nil{
         log.Fatalln("[accept_incomming_connections] Error (net.Listen):", err)
@@ -29,6 +30,8 @@ func accept_incomming_connections(pcc chan PlayerConnection, pn chan byte){
     log.Println("[accept_incomming_connections] Listening on:", listener.Addr())
 
     port_counter:=uint16(port_counter_start)
+    player_num_mutex:=&sync.Mutex{}
+    player_num:=byte(1)
     for{
         connection, err:=listener.Accept()
         if err != nil {
@@ -37,7 +40,7 @@ func accept_incomming_connections(pcc chan PlayerConnection, pn chan byte){
         }
 
         port_counter+=2
-        if port_counter<10{
+        if port_counter<port_counter_start{
             port_counter=port_counter_start
         }
         go func(connection net.Conn, gamestate_port, eventstate_port uint16){
@@ -60,13 +63,17 @@ func accept_incomming_connections(pcc chan PlayerConnection, pn chan byte){
                 return
             }
 
-            buffer[0]=<-pn
+            player_num_mutex.Lock()
+            defer player_num_mutex.Unlock()
+            buffer[0]=player_num
+            player_num=(player_num%2)+1
+
             uint16_to_slice(gamestate_port, buffer[1:3])
             uint16_to_slice(eventstate_port, buffer[3:5])
             _,err=connection.Write(buffer[:5])
             if err!=nil{
                 log.Println("[accept_incomming_connections] Error (connection.Write):", err)
-                pn<-buffer[0]
+                player_num=buffer[0]
                 return
             }
             log.Println("[accept_incomming_connections] Connection established for:", connection.RemoteAddr())

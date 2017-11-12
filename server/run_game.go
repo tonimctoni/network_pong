@@ -63,13 +63,25 @@ func run_game(player1_connection, player2_connection PlayerConnection) {
     ball:=Ball{WINDOW_WIDTH/2-BALL_SIZE/2, WINDOW_HEIGHT/2-BALL_SIZE/2, BALL_SPEED, -BALL_SPEED}
 
     now:=time.Now()
+    connection_error_score:=int64(0)
     for atomic.LoadInt32(finished)==0{
         player1.update_keystate(atomic.LoadUint32(p1_eventstate))
         player2.update_keystate(atomic.LoadUint32(p2_eventstate))
 
         player1.move()
         player2.move()
-        ball.move(player1.pos, player2.pos)
+        point_for:=ball.move(player1.pos, player2.pos)
+        if point_for==0{
+            //nothing
+        } else if point_for==1{
+            player1.score+=1
+            ball=Ball{WINDOW_WIDTH/2-BALL_SIZE/2, WINDOW_HEIGHT/2-BALL_SIZE/2, BALL_SPEED, -BALL_SPEED}
+        } else if point_for==2{
+            player2.score+=1
+            ball=Ball{WINDOW_WIDTH/2-BALL_SIZE/2, WINDOW_HEIGHT/2-BALL_SIZE/2, -BALL_SPEED, -BALL_SPEED}
+        } else{
+            log.Fatalln("point_for<0 || point_for>2")
+        }
 
         send_buffer:=[16]byte{}
         int16_to_slice(player1.pos, send_buffer[0:2])
@@ -78,17 +90,27 @@ func run_game(player1_connection, player2_connection PlayerConnection) {
         int16_to_slice(ball.pos_y, send_buffer[6:8])
         int16_to_slice(ball.speed_x, send_buffer[8:10])
         int16_to_slice(ball.speed_y, send_buffer[10:12])
-        int16_to_slice(0, send_buffer[12:14])
-        int16_to_slice(0, send_buffer[14:16])
+        int16_to_slice(player1.score, send_buffer[12:14])
+        int16_to_slice(player2.score, send_buffer[14:16])
 
-        n,err:=p1_gamestate_connection.Write(send_buffer[:])
+        _,err:=p1_gamestate_connection.Write(send_buffer[:])
         if err!=nil{
-            log.Println("[run_game] Error (p1_gamestate_connection.Write):", n, err)
+            // log.Println("[run_game] Error (p1_gamestate_connection.Write):", n, err)
+            connection_error_score+=10
         }
 
-        n,err=p2_gamestate_connection.Write(send_buffer[:])
+        _,err=p2_gamestate_connection.Write(send_buffer[:])
         if err!=nil{
-            log.Println("[run_game] Error (p2_gamestate_connection.Write):", n, err)
+            // log.Println("[run_game] Error (p2_gamestate_connection.Write):", n, err)
+            connection_error_score+=10
+        }
+
+        connection_error_score-=2
+        if connection_error_score<0{
+            connection_error_score=0
+        } else if connection_error_score>500{
+            log.Printf("Connection_error_score too high, closing game for %s:%d and %s:%d\n", player1_connection.ip_address, player1_connection.gamestate_port, player2_connection.ip_address, player2_connection.gamestate_port)
+            return
         }
 
         iteration_duration:=time.Since(now)
